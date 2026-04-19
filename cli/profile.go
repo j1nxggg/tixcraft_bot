@@ -120,7 +120,7 @@ func detectProjectDir() (string, error) {
 func chromeUserDataDir() (string, error) {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
-		return "", errors.New("找不到 LOCALAPPDATA，無法定位 Chrome User Data")
+		return "", errors.New("找不到 LOCALAPPDATA, 無法定位 Chrome User Data")
 	}
 
 	return filepath.Join(localAppData, "Google", "Chrome", "User Data"), nil
@@ -130,13 +130,13 @@ func copyChromeProfile(sourceDir, destDir string) error {
 	sourceInfo, err := os.Stat(sourceDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("找不到 Chrome User Data：%s", sourceDir)
+			return fmt.Errorf("找不到 Chrome User Data: %s", sourceDir)
 		}
 		return fmt.Errorf("讀取 Chrome User Data 失敗: %w", err)
 	}
 
 	if !sourceInfo.IsDir() {
-		return fmt.Errorf("Chrome User Data 路徑不是資料夾：%s", sourceDir)
+		return fmt.Errorf("Chrome User Data 路徑不是資料夾: %s", sourceDir)
 	}
 
 	if err := killChromeProcesses(); err != nil {
