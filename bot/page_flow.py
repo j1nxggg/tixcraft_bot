@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from runtime_context import SCREENSHOT_DIR, TARGET_TABLE_HEADERS
+from config import SCREENSHOT_DIR, TARGET_TABLE_HEADERS
 
 
 def build_game_url(ticket_url: str) -> str:
