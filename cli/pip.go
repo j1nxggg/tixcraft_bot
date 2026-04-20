@@ -121,7 +121,7 @@ func enableSitePackages(venvDir string) error {
 		return err
 	}
 
-	// 處理 "#import site" 或 "# import site" 這類變體
+	// 處理 "#import site" 或 "# import site" 變體
 	re := regexp.MustCompile(`(?m)^\s*#\s*import\s+site\s*$`)
 	if re.Match(data) {
 		newData := re.ReplaceAll(data, []byte("import site"))
