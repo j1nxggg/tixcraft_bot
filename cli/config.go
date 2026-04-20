@@ -40,9 +40,9 @@ func (c botConfig) toEnvLines() []string {
 		"TICKET_NAME=" + c.TicketName,
 		"TICKET_PRICE=" + c.Price,
 		"TICKET_QUANTITY=" + c.Quantity,
-		"SHOW_TIME=" + c.ShowTime,
+		"SHOW_TIME=" + normalizeDateTimeValue(c.ShowTime),
 		"FALLBACK_POLICY=" + c.FallbackPolicy,
-		"GRAB_TIME=" + c.GrabTime,
+		"GRAB_TIME=" + normalizeDateTimeValue(c.GrabTime),
 	}
 }
 
@@ -53,9 +53,9 @@ var envKeyMap = map[string]func(*botConfig, string){
 	"TICKET_NAME":        func(c *botConfig, v string) { c.TicketName = v },
 	"TICKET_PRICE":       func(c *botConfig, v string) { c.Price = v },
 	"TICKET_QUANTITY":    func(c *botConfig, v string) { c.Quantity = v },
-	"SHOW_TIME":          func(c *botConfig, v string) { c.ShowTime = v },
+	"SHOW_TIME":          func(c *botConfig, v string) { c.ShowTime = normalizeDateTimeValue(v) },
 	"FALLBACK_POLICY":    func(c *botConfig, v string) { c.FallbackPolicy = v },
-	"GRAB_TIME":          func(c *botConfig, v string) { c.GrabTime = v },
+	"GRAB_TIME":          func(c *botConfig, v string) { c.GrabTime = normalizeDateTimeValue(v) },
 }
 
 var fallbackOptions = []string{"往下找", "往上找"}
@@ -199,7 +199,7 @@ func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *hu
 
 			huh.NewInput().
 				Title("場次時間").
-				Description("格式：YYYY/MM/DD HH:MM:SS").
+				Description("格式：YYYY/MM/DD HH:MM").
 				Value(&initial.ShowTime).
 				Validate(validateDateTime),
 
@@ -210,7 +210,7 @@ func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *hu
 
 			huh.NewInput().
 				Title("設定搶票時間").
-				Description("格式：YYYY/MM/DD HH:MM:SS").
+				Description("格式：YYYY/MM/DD HH:MM").
 				Value(&initial.GrabTime).
 				Validate(validateDateTime),
 		),
@@ -258,12 +258,27 @@ func validateTicketURL(s string) error {
 }
 
 func validateDateTime(s string) error {
-	s = strings.TrimSpace(s)
+	s = normalizeDateTimeValue(s)
 	if s == "" {
 		return errors.New("不可為空")
 	}
-	if _, err := time.Parse("2006/01/02 15:04:05", s); err != nil {
-		return errors.New("格式需為 YYYY/MM/DD HH:MM:SS")
+	if _, err := time.Parse("2006/01/02 15:04", s); err != nil {
+		return errors.New("格式需為 YYYY/MM/DD HH:MM")
 	}
 	return nil
+}
+
+func normalizeDateTimeValue(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+
+	for _, layout := range []string{"2006/01/02 15:04:05", "2006/01/02 15:04"} {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			return parsed.Format("2006/01/02 15:04")
+		}
+	}
+
+	return s
 }
