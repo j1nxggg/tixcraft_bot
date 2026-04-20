@@ -1,11 +1,13 @@
 import asyncio
+import json
 import subprocess
 import sys
+from pathlib import Path
 
 from nodriver import Config, cdp, start
 from nodriver.core import util as nodriver_util
 
-from runtime_context import PROFILE_DIR, PROJECT_ROOT, TICKET_AREA_PATH_FRAGMENT, log
+from config import PROFILE_DIR, PROJECT_ROOT, TICKET_AREA_PATH_FRAGMENT, log
 
 
 async def close_browser_gracefully(browser) -> None:
@@ -176,3 +178,64 @@ async def rush_purchase_url(page, purchase_url: str) -> None:
         if TICKET_AREA_PATH_FRAGMENT in current_url:
             log(f"rush 成功（第 {attempt} 次嘗試）：{current_url}")
             return
+
+
+def normalize_profile_exit_state() -> None:
+    local_state_path = PROFILE_DIR / "Local State"
+    profile_dirs = [
+        path
+        for path in PROFILE_DIR.iterdir()
+        if path.is_dir() and (path.name == "Default" or path.name.startswith("Profile "))
+    ]
+
+    if local_state_path.exists():
+        _patch_json_file(local_state_path, _apply_local_state_patch)
+
+    for profile_dir in profile_dirs:
+        preferences_path = profile_dir / "Preferences"
+        if preferences_path.exists():
+            _patch_json_file(preferences_path, _apply_preferences_patch)
+
+
+def _patch_json_file(path: Path, patcher) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not patcher(data):
+        return
+
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _apply_local_state_patch(data: dict) -> bool:
+    changed = False
+
+    was = data.setdefault("was", {})
+    if was.get("restarted") is not False:
+        was["restarted"] = False
+        changed = True
+
+    return changed
+
+
+def _apply_preferences_patch(data: dict) -> bool:
+    changed = False
+
+    profile = data.setdefault("profile", {})
+    if profile.get("exit_type") != "Normal":
+        profile["exit_type"] = "Normal"
+        changed = True
+    if profile.get("exited_cleanly") is not True:
+        profile["exited_cleanly"] = True
+        changed = True
+
+    session = data.setdefault("session", {})
+    if session.get("exit_type") != "Normal":
+        session["exit_type"] = "Normal"
+        changed = True
+    if session.get("exited_cleanly") is not True:
+        session["exited_cleanly"] = True
+        changed = True
+
+    return changed
