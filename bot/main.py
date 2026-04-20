@@ -8,22 +8,21 @@ BOT_DIR = Path(__file__).resolve().parent
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
-from runtime_context import TAIPEI_TZ, log, patch_nodriver_network_file
+from config import TAIPEI_TZ, load_env_config, log, patch_nodriver_network_file
 
 patch_nodriver_network_file()
 
-from browser_flow import (
+from browser import (
     close_extra_startup_tabs,
     disconnect_browser_session,
+    normalize_profile_exit_state,
     pick_startup_tab,
     rush_purchase_url,
     start_detached_browser,
 )
-from config_store import load_env_config
-from model_loader import ensure_ocr_model_ready
-from profile_state import normalize_profile_exit_state
-from schedule import build_game_url, build_purchase_url, locate_purchase_button
-from time_sync import (
+from ocr import ensure_ocr_model_ready
+from page_flow import build_game_url, build_purchase_url, locate_purchase_button
+from timing import (
     calibrate_server_time_offset,
     parse_grab_time,
     periodic_recalibrate,
