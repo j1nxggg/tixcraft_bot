@@ -5,7 +5,7 @@ from statistics import median
 
 import aiohttp
 
-from runtime_context import (
+from config import (
     CALIBRATION_INTERVAL_SECONDS,
     CALIBRATION_SAMPLE_COUNT,
     CALIBRATION_URL,
