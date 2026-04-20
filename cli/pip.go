@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -14,12 +16,62 @@ const (
 	getPipURL       = "https://bootstrap.pypa.io/get-pip.py"
 	getPipFileName  = "get-pip.py"
 	requirementsTxt = "requirements.txt"
+	nodriverCDPPath = "Lib\\site-packages\\nodriver\\cdp\\network.py"
 )
 
 type pipInstallDoneMsg struct {
 	venvDir string
 	reqPath string
 	err     error
+}
+
+type requirementsCheckDoneMsg struct {
+	venvDir         string
+	reqPath         string
+	missingPackages []string
+	err             error
+}
+
+func checkRequirementsCmd(rootDir, venvDir string) tea.Cmd {
+	return func() tea.Msg {
+		reqPath := filepath.Join(rootDir, requirementsTxt)
+
+		if _, err := os.Stat(reqPath); err != nil {
+			if os.IsNotExist(err) {
+				return requirementsCheckDoneMsg{
+					venvDir: venvDir,
+					reqPath: reqPath,
+					err:     fmt.Errorf("找不到 %s", reqPath),
+				}
+			}
+			return requirementsCheckDoneMsg{venvDir: venvDir, reqPath: reqPath, err: err}
+		}
+
+		if err := enableSitePackages(venvDir); err != nil {
+			return requirementsCheckDoneMsg{venvDir: venvDir, reqPath: reqPath, err: fmt.Errorf("啟用 site-packages 失敗:%w", err)}
+		}
+
+		if err := ensurePip(venvDir); err != nil {
+			return requirementsCheckDoneMsg{venvDir: venvDir, reqPath: reqPath, err: fmt.Errorf("安裝 pip 失敗:%w", err)}
+		}
+
+		missing, err := findMissingPackages(venvDir, reqPath)
+		if err != nil {
+			return requirementsCheckDoneMsg{venvDir: venvDir, reqPath: reqPath, err: err}
+		}
+
+		if len(missing) == 0 {
+			if err := patchNodriverNetworkFile(venvDir); err != nil {
+				return requirementsCheckDoneMsg{venvDir: venvDir, reqPath: reqPath, err: fmt.Errorf("修補 nodriver 失敗:%w", err)}
+			}
+		}
+
+		return requirementsCheckDoneMsg{
+			venvDir:         venvDir,
+			reqPath:         reqPath,
+			missingPackages: missing,
+		}
+	}
 }
 
 func installRequirementsCmd(rootDir, venvDir string) tea.Cmd {
@@ -47,6 +99,10 @@ func installRequirementsCmd(rootDir, venvDir string) tea.Cmd {
 
 		if err := runPipInstall(venvDir, reqPath); err != nil {
 			return pipInstallDoneMsg{venvDir: venvDir, reqPath: reqPath, err: fmt.Errorf("安裝套件失敗:%w", err)}
+		}
+
+		if err := patchNodriverNetworkFile(venvDir); err != nil {
+			return pipInstallDoneMsg{venvDir: venvDir, reqPath: reqPath, err: fmt.Errorf("修補 nodriver 失敗:%w", err)}
 		}
 
 		return pipInstallDoneMsg{venvDir: venvDir, reqPath: reqPath}
@@ -136,4 +192,93 @@ func runPipInstall(venvDir, reqPath string) error {
 		return fmt.Errorf("%w\n%s", err, string(output))
 	}
 	return nil
+}
+
+func findMissingPackages(venvDir, reqPath string) ([]string, error) {
+	requirements, err := parseRequirementNames(reqPath)
+	if err != nil {
+		return nil, err
+	}
+
+	python := filepath.Join(venvDir, "python.exe")
+	var missing []string
+
+	for _, requirement := range requirements {
+		cmd := exec.Command(python, "-m", "pip", "show", requirement)
+		if err := cmd.Run(); err == nil {
+			continue
+		} else if _, ok := err.(*exec.ExitError); ok {
+			missing = append(missing, requirement)
+			continue
+		} else {
+			return nil, fmt.Errorf("檢查套件 %s 失敗:%w", requirement, err)
+		}
+	}
+
+	return missing, nil
+}
+
+func parseRequirementNames(reqPath string) ([]string, error) {
+	data, err := os.ReadFile(reqPath)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	nameRe := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*`)
+	seen := make(map[string]struct{})
+	var requirements []string
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "-") {
+			continue
+		}
+
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line == "" {
+			continue
+		}
+
+		name := nameRe.FindString(line)
+		if name == "" {
+			return nil, fmt.Errorf("無法解析 requirements.txt 內容: %s", line)
+		}
+
+		normalized := strings.ToLower(name)
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+
+		seen[normalized] = struct{}{}
+		requirements = append(requirements, name)
+	}
+
+	return requirements, nil
+}
+
+func patchNodriverNetworkFile(venvDir string) error {
+	networkPath := filepath.Join(venvDir, nodriverCDPPath)
+
+	data, err := os.ReadFile(networkPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("找不到 %s", networkPath)
+		}
+		return err
+	}
+
+	cleaned := bytes.ReplaceAll(data, []byte{0xB1}, nil)
+	cleaned = bytes.ReplaceAll(cleaned, []byte("\uFFFD"), nil)
+	if bytes.Equal(cleaned, data) {
+		return nil
+	}
+
+	return os.WriteFile(networkPath, cleaned, 0o644)
 }

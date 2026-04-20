@@ -21,17 +21,21 @@ const (
 )
 
 type botConfig struct {
-	URL            string
-	TicketName     string
-	Price          string
-	Quantity       string
-	ShowTime       string
-	FallbackPolicy string
-	GrabTime       string
+	URL              string
+	TicketName       string
+	Price            string
+	Quantity         string
+	ShowTime         string
+	FallbackPolicy   string
+	GrabTime         string
+	ChromeProfileDir string
+	LoginProvider    string
 }
 
 func (c botConfig) toEnvLines() []string {
 	return []string{
+		"CHROME_PROFILE_DIR=" + c.ChromeProfileDir,
+		"LOGIN_PROVIDER=" + c.LoginProvider,
 		"TICKET_URL=" + c.URL,
 		"TICKET_NAME=" + c.TicketName,
 		"TICKET_PRICE=" + c.Price,
@@ -43,16 +47,19 @@ func (c botConfig) toEnvLines() []string {
 }
 
 var envKeyMap = map[string]func(*botConfig, string){
-	"TICKET_URL":      func(c *botConfig, v string) { c.URL = v },
-	"TICKET_NAME":     func(c *botConfig, v string) { c.TicketName = v },
-	"TICKET_PRICE":    func(c *botConfig, v string) { c.Price = v },
-	"TICKET_QUANTITY": func(c *botConfig, v string) { c.Quantity = v },
-	"SHOW_TIME":       func(c *botConfig, v string) { c.ShowTime = v },
-	"FALLBACK_POLICY": func(c *botConfig, v string) { c.FallbackPolicy = v },
-	"GRAB_TIME":       func(c *botConfig, v string) { c.GrabTime = v },
+	"CHROME_PROFILE_DIR": func(c *botConfig, v string) { c.ChromeProfileDir = v },
+	"LOGIN_PROVIDER":     func(c *botConfig, v string) { c.LoginProvider = strings.ToLower(strings.TrimSpace(v)) },
+	"TICKET_URL":         func(c *botConfig, v string) { c.URL = v },
+	"TICKET_NAME":        func(c *botConfig, v string) { c.TicketName = v },
+	"TICKET_PRICE":       func(c *botConfig, v string) { c.Price = v },
+	"TICKET_QUANTITY":    func(c *botConfig, v string) { c.Quantity = v },
+	"SHOW_TIME":          func(c *botConfig, v string) { c.ShowTime = v },
+	"FALLBACK_POLICY":    func(c *botConfig, v string) { c.FallbackPolicy = v },
+	"GRAB_TIME":          func(c *botConfig, v string) { c.GrabTime = v },
 }
 
-var fallbackOptions = []string{"往下找", "往上找", "重新整理", "放棄"}
+var fallbackOptions = []string{"往下找", "往上找"}
+var loginProviderOptions = []string{"google", "facebook"}
 
 type configCheckDoneMsg struct {
 	rootDir   string
@@ -136,13 +143,39 @@ func saveConfigCmd(envPath string, cfg botConfig) tea.Cmd {
 }
 
 // 建立一個新的 huh Form,預設值帶入 initial
-func newConfigForm(initial *botConfig) *huh.Form {
+func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *huh.Form {
 	if initial.FallbackPolicy == "" {
 		initial.FallbackPolicy = fallbackOptions[0]
+	}
+	if initial.ChromeProfileDir == "" && len(chromeProfiles) > 0 {
+		initial.ChromeProfileDir = chromeProfiles[0].Basename
+	}
+	if initial.LoginProvider == "" {
+		initial.LoginProvider = loginProviderOptions[0]
+	}
+
+	profileOptions := make([]huh.Option[string], 0, len(chromeProfiles))
+	for _, profile := range chromeProfiles {
+		profileOptions = append(profileOptions, huh.NewOption(profile.Label, profile.Basename))
 	}
 
 	return huh.NewForm(
 		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Chrome 設定檔").
+				Description("從 Local State 的 gaia_name 讀取可用帳號").
+				Options(profileOptions...).
+				Value(&initial.ChromeProfileDir),
+
+			huh.NewSelect[string]().
+				Title("登入方式").
+				Description("進入 Tixcraft 後要點選的社群登入按鈕").
+				Options(
+					huh.NewOption("Google", "google"),
+					huh.NewOption("Facebook", "facebook"),
+				).
+				Value(&initial.LoginProvider),
+
 			huh.NewInput().
 				Title("票券網址").
 				Placeholder("https://tixcraft.com/activity/detail/xxx").
