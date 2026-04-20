@@ -1,0 +1,13 @@
+model/
+
+venv/
+
+__pycache__/
+
+Profile/
+
+*.exe
+
+.env
+
+.profile-meta.json
