@@ -553,7 +553,7 @@ func (m model) launchBot(reason string) (tea.Model, tea.Cmd) {
 	m.quitting = true
 	m.quitMsg = fmt.Sprintf("%s\n即將啟動：%s\n", reason, script)
 
-	cmd := exec.Command(python, script)
+	cmd := exec.Command(python, "-u", script)
 	cmd.Dir = m.rootDir
 
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
