@@ -26,7 +26,7 @@ const (
 	stageRunning
 	stagePythonCheck
 	stagePythonRunning
-	stagePipInstalling
+	stageDepsSyncing
 	stageConfigCheck
 	stageConfigConfirmOverwrite
 	stageConfigForm
@@ -53,10 +53,25 @@ type model struct {
 	statusText        string
 	detailText        string
 	success           bool
-	pipNoticeShown    bool
+	spinnerFrame      int
 }
 
-type pipInstallSlowMsg struct{}
+type spinnerTickMsg struct{}
+
+type botProcessDoneMsg struct {
+	err error
+}
+
+// 手寫 spinner,避免多引入 bubbles 當 direct dep
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+const spinnerTickInterval = 100 * time.Millisecond
+
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(spinnerTickInterval, func(time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
 
 func initialModel() model {
 	return model{
@@ -66,7 +81,7 @@ func initialModel() model {
 }
 
 func (m model) Init() tea.Cmd {
-	return checkProfileCmd()
+	return tea.Batch(checkProfileCmd(), spinnerTickCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -91,14 +106,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pythonSetupDoneMsg:
 		return m.handlePythonSetup(msg)
 
-	case requirementsCheckDoneMsg:
-		return m.handleRequirementsCheck(msg)
+	case uvSyncDoneMsg:
+		return m.handleUvSync(msg)
 
-	case pipInstallDoneMsg:
-		return m.handlePipInstall(msg)
+	case spinnerTickMsg:
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return m, spinnerTickCmd()
 
-	case pipInstallSlowMsg:
-		return m.handlePipInstallSlow()
+	case botProcessDoneMsg:
+		return m.handleBotProcessDone(msg)
 
 	case configCheckDoneMsg:
 		return m.handleConfigCheck(msg)
@@ -235,15 +251,15 @@ func (m model) handlePythonCheck(msg pythonCheckDoneMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.exists {
-		m.stage = stagePipInstalling
-		m.statusText = "venv/ 內已有 Python,正在檢查 requirements.txt 套件..."
-		m.detailText = fmt.Sprintf("已在以下位置偵測到 python.exe：\n%s", msg.venvDir)
-		return m, checkRequirementsCmd(m.rootDir, m.venvDir)
+		m.stage = stageDepsSyncing
+		m.statusText = "venv/ 內已有 Python 與 uv,正在同步 requirements.txt..."
+		m.detailText = fmt.Sprintf("已偵測到 python.exe 與 uv.exe：\n%s", msg.venvDir)
+		return m, uvSyncCmd(m.rootDir, m.venvDir)
 	}
 
 	m.stage = stagePythonRunning
-	m.statusText = "正在下載並解壓 Python..."
-	m.detailText = fmt.Sprintf("下載中:\n%s\n\n目的地：%s", pythonZipURL, msg.venvDir)
+	m.statusText = "正在下載並解壓 Python 與 uv..."
+	m.detailText = fmt.Sprintf("目的地：%s", msg.venvDir)
 	return m, setupPythonCmd(msg.rootDir, false)
 }
 
@@ -253,71 +269,29 @@ func (m model) handlePythonSetup(msg pythonSetupDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.stage = stageDone
 		m.success = false
-		m.statusText = "Python 安裝失敗"
+		m.statusText = "Python / uv 安裝失敗"
 		m.detailText = msg.err.Error()
 		return m, nil
 	}
 
-	m.stage = stagePipInstalling
-	m.statusText = "正在啟用 pip 並安裝 requirements.txt..."
-	m.detailText = fmt.Sprintf("Python 已解壓到：\n%s", msg.venvDir)
-	return m, m.startPipInstall(installRequirementsCmd(m.rootDir, m.venvDir))
+	m.stage = stageDepsSyncing
+	m.statusText = "正在用 uv 同步 Python 套件..."
+	m.detailText = fmt.Sprintf("Python 與 uv 已就緒：\n%s", msg.venvDir)
+	return m, uvSyncCmd(m.rootDir, m.venvDir)
 }
 
-func (m model) handleRequirementsCheck(msg requirementsCheckDoneMsg) (tea.Model, tea.Cmd) {
+func (m model) handleUvSync(msg uvSyncDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.stage = stageDone
 		m.success = false
-		m.statusText = "Python 環境檢查失敗"
-		m.detailText = msg.err.Error()
-		return m, nil
-	}
-
-	if len(msg.missingPackages) == 0 {
-		m.stage = stageConfigCheck
-		m.statusText = "Python 環境正常,正在檢查設定檔..."
-		m.detailText = fmt.Sprintf("已確認 requirements.txt 內的套件都已存在：\n%s", msg.reqPath)
-		return m, checkConfigCmd(m.rootDir)
-	}
-
-	m.stage = stagePipInstalling
-	m.statusText = "現有 venv 缺少套件,正在安裝 requirements.txt..."
-	m.detailText = fmt.Sprintf(
-		"缺少以下套件：\n%s\n\nrequirements：%s",
-		strings.Join(msg.missingPackages, "\n"),
-		msg.reqPath,
-	)
-	return m, m.startPipInstall(installRequirementsCmd(m.rootDir, m.venvDir))
-}
-
-func (m model) handlePipInstall(msg pipInstallDoneMsg) (tea.Model, tea.Cmd) {
-	m.pipNoticeShown = false
-
-	if msg.err != nil {
-		m.stage = stageDone
-		m.success = false
-		m.statusText = "套件安裝失敗"
+		m.statusText = "套件同步失敗"
 		m.detailText = msg.err.Error()
 		return m, nil
 	}
 
 	m.stage = stageConfigCheck
-	m.statusText = "套件安裝完成,正在檢查設定檔..."
+	m.statusText = "套件同步完成,正在檢查設定檔..."
 	return m, checkConfigCmd(m.rootDir)
-}
-
-func (m model) handlePipInstallSlow() (tea.Model, tea.Cmd) {
-	if m.stage != stagePipInstalling || m.pipNoticeShown {
-		return m, nil
-	}
-
-	m.pipNoticeShown = true
-	if m.detailText == "" {
-		m.detailText = "目前腳本沒有當掉，請放心"
-	} else {
-		m.detailText += "\n\n目前腳本沒有當掉，請放心"
-	}
-	return m, nil
 }
 
 func (m model) handleConfigCheck(msg configCheckDoneMsg) (tea.Model, tea.Cmd) {
@@ -333,10 +307,12 @@ func (m model) handleConfigCheck(msg configCheckDoneMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.exists {
-		if !m.hasChromeProfileOption(msg.oldConfig.ChromeProfileDir) || !m.hasLoginProviderOption(msg.oldConfig.LoginProvider) {
+		if !m.hasChromeProfileOption(msg.oldConfig.ChromeProfileDir) ||
+			!m.hasLoginProviderOption(msg.oldConfig.LoginProvider) ||
+			!isValidQuantityOption(msg.oldConfig.Quantity) {
 			m.stage = stageConfigForm
 			m.statusText = "設定檔缺少必要選項"
-			m.detailText = "請先選擇要使用的 Chrome 設定檔與登入方式。"
+			m.detailText = "請先選擇要使用的 Chrome 設定檔、登入方式與票數。"
 			return m.enterConfigForm(m.defaultConfig(msg.oldConfig))
 		}
 
@@ -384,6 +360,20 @@ func (m model) handleConfigSave(msg configSaveDoneMsg) (tea.Model, tea.Cmd) {
 	saved := msg.cfg
 	m.cfg = &saved
 	return m.launchBot(fmt.Sprintf("設定已寫入 %s", msg.envPath))
+}
+
+func (m model) handleBotProcessDone(msg botProcessDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err == nil {
+		m.quitting = true
+		m.quitMsg = "Python bot 已結束。"
+		return m, tea.Quit
+	}
+
+	m.stage = stageDone
+	m.success = false
+	m.statusText = "Python bot 執行失敗"
+	m.detailText = msg.err.Error()
+	return m, nil
 }
 
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -527,17 +517,6 @@ func (m model) renderConfigReview(cfg botConfig) string {
 	)
 }
 
-func (m *model) startPipInstall(cmd tea.Cmd) tea.Cmd {
-	m.pipNoticeShown = false
-	return tea.Batch(cmd, pipInstallSlowNoticeCmd())
-}
-
-func pipInstallSlowNoticeCmd() tea.Cmd {
-	return tea.Tick(10*time.Second, func(time.Time) tea.Msg {
-		return pipInstallSlowMsg{}
-	})
-}
-
 func (m model) launchBot(reason string) (tea.Model, tea.Cmd) {
 	python := filepath.Join(m.venvDir, "python.exe")
 	script := filepath.Join(m.rootDir, botDirName, "main.py")
@@ -545,19 +524,26 @@ func (m model) launchBot(reason string) (tea.Model, tea.Cmd) {
 	if err := patchNodriverNetworkFile(m.venvDir); err != nil {
 		m.stage = stageDone
 		m.success = false
-		m.statusText = "啟動前修補 nodriver 失敗"
+		m.statusText = "啟動前修補 nodriver network.py 失敗"
+		m.detailText = err.Error()
+		return m, nil
+	}
+	if err := patchNodriverConnectionFile(m.venvDir); err != nil {
+		m.stage = stageDone
+		m.success = false
+		m.statusText = "啟動前修補 nodriver connection.py 失敗"
 		m.detailText = err.Error()
 		return m, nil
 	}
 
-	m.quitting = true
-	m.quitMsg = fmt.Sprintf("%s\n即將啟動：%s\n", reason, script)
+	m.statusText = "正在執行 Python bot..."
+	m.detailText = fmt.Sprintf("%s\n即將啟動：%s", reason, script)
 
 	cmd := exec.Command(python, "-u", script)
 	cmd.Dir = m.rootDir
 
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return tea.QuitMsg{}
+		return botProcessDoneMsg{err: err}
 	})
 }
 
@@ -598,6 +584,9 @@ func (m model) defaultConfig(cfg botConfig) botConfig {
 	}
 	if !m.hasLoginProviderOption(cfg.LoginProvider) {
 		cfg.LoginProvider = loginProviderOptions[0]
+	}
+	if !isValidQuantityOption(cfg.Quantity) {
+		cfg.Quantity = quantityOptions[0]
 	}
 
 	return cfg
@@ -675,16 +664,26 @@ func (m model) renderContent() string {
 		m.stage == stageRunning,
 		m.stage == stagePythonCheck,
 		m.stage == stagePythonRunning,
-		m.stage == stagePipInstalling,
+		m.stage == stageDepsSyncing,
 		m.stage == stageConfigCheck,
 		m.stage == stageConfigSaving:
-		status = ui.PromptStyle.Render("處理中") + " " + status
+		spinner := spinnerFrames[m.spinnerFrame%len(spinnerFrames)]
+		status = ui.PromptStyle.Render(spinner+" 處理中") + " " + status
 	}
 
-	if m.detailText == "" {
+	detail := m.detailText
+	if progress := downloadProgressText(); progress != "" {
+		if detail == "" {
+			detail = progress
+		} else {
+			detail = detail + "\n\n" + progress
+		}
+	}
+
+	if detail == "" {
 		return status
 	}
-	return status + "\n\n" + m.detailText
+	return status + "\n\n" + detail
 }
 
 func (m model) helpText() string {

@@ -224,18 +224,15 @@ func copyChromeProfile(sourceDir, destDir string) error {
 
 func resetChromeProfile(projectDir string) error {
 	profileDir := filepath.Join(projectDir, "Profile")
-	metaPath := profileMetaPath(projectDir)
 
 	if err := killChromeProcesses(); err != nil {
 		return err
 	}
 
+	// metadata / CDP sentinel 都已放進 Profile/ 裡(.bot-meta.json / .bot-cdp.json),
+	// RemoveAll 一次帶走所有狀態
 	if err := os.RemoveAll(profileDir); err != nil {
 		return fmt.Errorf("刪除 Profile 資料夾失敗: %w", err)
-	}
-
-	if err := os.Remove(metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("刪除 Profile metadata 失敗: %w", err)
 	}
 
 	return nil
@@ -248,6 +245,15 @@ func killChromeProcesses() error {
 	}
 	if !running {
 		return nil
+	}
+
+	// 先送 graceful close (WM_CLOSE) 給 Chrome,讓它有機會正常存資料、寫 cookie
+	// 等最多 gracefulTimeout 秒,仍在跑才用 /F 強殺
+	if err := gracefullyCloseChrome(); err == nil {
+		if waitChromeExit(gracefulCloseTimeout) {
+			time.Sleep(300 * time.Millisecond)
+			return nil
+		}
 	}
 
 	cmd := exec.Command("taskkill", "/F", "/IM", "chrome.exe", "/T")
@@ -266,6 +272,36 @@ func killChromeProcesses() error {
 
 	time.Sleep(500 * time.Millisecond)
 	return nil
+}
+
+const gracefulCloseTimeout = 5 * time.Second
+
+// gracefullyCloseChrome 用不帶 /F 的 taskkill 送 WM_CLOSE 給 Chrome 主視窗,
+// 等同使用者自己點 Chrome 右上角叉叉,讓 Chrome 正常關閉
+func gracefullyCloseChrome() error {
+	cmd := exec.Command("taskkill", "/IM", "chrome.exe", "/T")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// exit code 128 = 找不到行程,視為已經沒在跑
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 128 {
+			return nil
+		}
+		return fmt.Errorf("送出 graceful close 失敗: %v %s", err, string(output))
+	}
+	return nil
+}
+
+// waitChromeExit 每 250ms 檢查一次,直到 Chrome 完全退出或逾時
+func waitChromeExit(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, err := chromeProcessesRunning()
+		if err == nil && !running {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
 }
 
 func chromeProcessesRunning() (bool, error) {
@@ -326,8 +362,11 @@ func pathExists(path string) bool {
 	return err == nil
 }
 
+// profileMetaPath 回傳 Profile 附加 metadata 檔的完整路徑。
+// 放在 Profile/ 裡面讓 RemoveAll(Profile) 能一次清乾淨,
+// 同時不污染專案根目錄。Chrome 只認固定檔名,看到 .bot-meta.json 會直接忽略。
 func profileMetaPath(projectDir string) string {
-	return filepath.Join(projectDir, ".profile-meta.json")
+	return filepath.Join(projectDir, "Profile", ".bot-meta.json")
 }
 
 func writeProfileMetadata(profileDir, sourceDir string) error {

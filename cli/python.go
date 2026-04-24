@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 
@@ -38,29 +37,24 @@ func checkPythonCmd(projectDir string) tea.Cmd {
 		rootDir := projectDir
 		venvDir := filepath.Join(rootDir, venvDirName)
 
+		// python.exe 和 uv.exe 都在才算完整;任一缺失都要走 setup 流程補齊
 		pythonExe := filepath.Join(venvDir, "python.exe")
-		_, err := os.Stat(pythonExe)
+		uvExe := filepath.Join(venvDir, uvBinaryName)
 
-		if err == nil {
-			return pythonCheckDoneMsg{
-				rootDir: rootDir,
-				venvDir: venvDir,
-				exists:  true,
-			}
+		pythonStat, pythonErr := os.Stat(pythonExe)
+		if pythonErr != nil && !os.IsNotExist(pythonErr) {
+			return pythonCheckDoneMsg{rootDir: rootDir, venvDir: venvDir, err: pythonErr}
 		}
 
-		if os.IsNotExist(err) {
-			return pythonCheckDoneMsg{
-				rootDir: rootDir,
-				venvDir: venvDir,
-				exists:  false,
-			}
+		uvStat, uvErr := os.Stat(uvExe)
+		if uvErr != nil && !os.IsNotExist(uvErr) {
+			return pythonCheckDoneMsg{rootDir: rootDir, venvDir: venvDir, err: uvErr}
 		}
 
 		return pythonCheckDoneMsg{
 			rootDir: rootDir,
 			venvDir: venvDir,
-			err:     err,
+			exists:  pythonStat != nil && uvStat != nil,
 		}
 	}
 }
@@ -79,42 +73,41 @@ func setupPythonCmd(rootDir string, overwrite bool) tea.Cmd {
 			return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("建立 venv 目錄失敗: %w", err)}
 		}
 
-		zipPath := filepath.Join(venvDir, pythonZipName)
-		if err := downloadFile(pythonZipURL, zipPath); err != nil {
-			return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("下載失敗: %w", err)}
+		// 沒有 python.exe 就下載 Python embeddable
+		pythonExe := filepath.Join(venvDir, "python.exe")
+		if _, err := os.Stat(pythonExe); err != nil {
+			if !os.IsNotExist(err) {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: err}
+			}
+
+			zipPath := filepath.Join(venvDir, pythonZipName)
+			if err := downloadFile(pythonZipURL, zipPath, "Python embeddable"); err != nil {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("下載 Python 失敗: %w", err)}
+			}
+
+			if err := unzipTo(zipPath, venvDir); err != nil {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("解壓 Python 失敗: %w", err)}
+			}
+
+			if err := os.Remove(zipPath); err != nil {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("刪除 Python zip 失敗: %w", err)}
+			}
 		}
 
-		if err := unzipTo(zipPath, venvDir); err != nil {
-			return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("解壓縮失敗: %w", err)}
-		}
+		// uv.exe 缺失就下載;兩者分開檢查讓中斷後續跑能續接
+		uvExe := filepath.Join(venvDir, uvBinaryName)
+		if _, err := os.Stat(uvExe); err != nil {
+			if !os.IsNotExist(err) {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: err}
+			}
 
-		if err := os.Remove(zipPath); err != nil {
-			return pythonSetupDoneMsg{venvDir: venvDir, err: fmt.Errorf("刪除壓縮檔失敗: %w", err)}
+			if err := installUvExe(venvDir); err != nil {
+				return pythonSetupDoneMsg{venvDir: venvDir, err: err}
+			}
 		}
 
 		return pythonSetupDoneMsg{venvDir: venvDir}
 	}
-}
-
-func downloadFile(url, dest string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, resp.Body)
-	return err
 }
 
 func unzipTo(zipPath, destDir string) error {

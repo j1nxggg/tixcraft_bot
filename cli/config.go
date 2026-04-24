@@ -60,6 +60,7 @@ var envKeyMap = map[string]func(*botConfig, string){
 
 var fallbackOptions = []string{"往下找", "往上找"}
 var loginProviderOptions = []string{"google", "facebook"}
+var quantityOptions = []string{"1", "2", "3", "4"}
 
 type configCheckDoneMsg struct {
 	rootDir   string
@@ -143,6 +144,9 @@ func saveConfigCmd(envPath string, cfg botConfig) tea.Cmd {
 }
 
 // 建立一個新的 huh Form,預設值帶入 initial
+//
+// 把欄位拆成三個 group (帳號 / 票券 / 時間) 是為了降低每一幀要渲染的欄位數量,
+// 單一 group 塞 9 個欄位會讓每次按鍵都要重繪整組,實測明顯卡頓。
 func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *huh.Form {
 	if initial.FallbackPolicy == "" {
 		initial.FallbackPolicy = fallbackOptions[0]
@@ -153,68 +157,91 @@ func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *hu
 	if initial.LoginProvider == "" {
 		initial.LoginProvider = loginProviderOptions[0]
 	}
+	if !isValidQuantityOption(initial.Quantity) {
+		initial.Quantity = quantityOptions[0]
+	}
 
 	profileOptions := make([]huh.Option[string], 0, len(chromeProfiles))
 	for _, profile := range chromeProfiles {
 		profileOptions = append(profileOptions, huh.NewOption(profile.Label, profile.Basename))
 	}
 
-	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Chrome 設定檔").
-				Description("從 Local State 的 gaia_name 讀取可用帳號").
-				Options(profileOptions...).
-				Value(&initial.ChromeProfileDir),
+	accountGroup := huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Chrome 設定檔").
+			Description("從 Local State 的 gaia_name 讀取可用帳號").
+			Options(profileOptions...).
+			Value(&initial.ChromeProfileDir),
 
-			huh.NewSelect[string]().
-				Title("登入方式").
-				Description("進入 Tixcraft 後要點選的社群登入按鈕").
-				Options(
-					huh.NewOption("Google", "google"),
-					huh.NewOption("Facebook", "facebook"),
-				).
-				Value(&initial.LoginProvider),
-
-			huh.NewInput().
-				Title("票券網址").
-				Placeholder("https://tixcraft.com/activity/detail/xxx").
-				Value(&initial.URL).
-				Validate(validateTicketURL),
-
-			huh.NewInput().
-				Title("票名").
-				Value(&initial.TicketName).
-				Validate(requireNonEmpty),
-
-			huh.NewInput().
-				Title("票價").
-				Value(&initial.Price).
-				Validate(validatePositiveInt),
-
-			huh.NewInput().
-				Title("票數").
-				Value(&initial.Quantity).
-				Validate(validatePositiveInt),
-
-			huh.NewInput().
-				Title("場次時間").
-				Description("格式：YYYY/MM/DD HH:MM").
-				Value(&initial.ShowTime).
-				Validate(validateDateTime),
-
-			huh.NewSelect[string]().
-				Title("若無票則").
-				Options(huh.NewOptions(fallbackOptions...)...).
-				Value(&initial.FallbackPolicy),
-
-			huh.NewInput().
-				Title("設定搶票時間").
-				Description("格式：YYYY/MM/DD HH:MM").
-				Value(&initial.GrabTime).
-				Validate(validateDateTime),
-		),
+		huh.NewSelect[string]().
+			Title("登入方式").
+			Description("進入 Tixcraft 後要點選的社群登入按鈕").
+			Options(
+				huh.NewOption("Google", "google"),
+				huh.NewOption("Facebook", "facebook"),
+			).
+			Value(&initial.LoginProvider),
 	)
+
+	ticketGroup := huh.NewGroup(
+		huh.NewInput().
+			Title("票券網址").
+			Placeholder("https://tixcraft.com/activity/detail/xxx").
+			CharLimit(200).
+			Value(&initial.URL).
+			Validate(validateTicketURL),
+
+		huh.NewInput().
+			Title("票名").
+			CharLimit(60).
+			Value(&initial.TicketName).
+			Validate(requireNonEmpty),
+
+		huh.NewInput().
+			Title("票價").
+			CharLimit(10).
+			Value(&initial.Price).
+			Validate(validatePositiveInt),
+
+		huh.NewSelect[string]().
+			Title("票數").
+			Description("拓元單筆最多 4 張").
+			Options(huh.NewOptions(quantityOptions...)...).
+			Value(&initial.Quantity),
+	)
+
+	timingGroup := huh.NewGroup(
+		huh.NewInput().
+			Title("場次時間").
+			Description("格式：YYYY/MM/DD HH:MM").
+			CharLimit(20).
+			Value(&initial.ShowTime).
+			Validate(validateDateTime),
+
+		huh.NewSelect[string]().
+			Title("若無票則").
+			Options(huh.NewOptions(fallbackOptions...)...).
+			Value(&initial.FallbackPolicy),
+
+		huh.NewInput().
+			Title("設定搶票時間").
+			Description("格式：YYYY/MM/DD HH:MM").
+			CharLimit(20).
+			Value(&initial.GrabTime).
+			Validate(validateDateTime),
+	)
+
+	return huh.NewForm(accountGroup, ticketGroup, timingGroup)
+}
+
+func isValidQuantityOption(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, option := range quantityOptions {
+		if option == value {
+			return true
+		}
+	}
+	return false
 }
 
 // ------ 驗證函式 ------
