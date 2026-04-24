@@ -1,7 +1,14 @@
 from datetime import datetime
 from pathlib import Path
 
-from config import SCREENSHOT_DIR, TARGET_TABLE_HEADERS
+from browser_ops import (
+    robust_child_select,
+    robust_child_select_all,
+    robust_get_attr,
+    robust_select,
+)
+from runtime_context import SCREENSHOT_DIR, TARGET_TABLE_HEADERS
+from urllib.parse import urlparse
 
 
 def build_game_url(ticket_url: str) -> str:
@@ -9,7 +16,8 @@ def build_game_url(ticket_url: str) -> str:
 
 
 def build_purchase_url(ticket_url: str, game_id: str) -> str:
-    game_code = ticket_url.rstrip("/").rsplit("/", 1)[-1]
+    path = urlparse(ticket_url).path.rstrip("/")
+    game_code = path.rsplit("/", 1)[-1]
     return f"https://tixcraft.com/ticket/area/{game_code}/{game_id}"
 
 
@@ -40,28 +48,20 @@ def schedule_time_matches(cell_text: str, show_date: str, show_clock: str) -> bo
     return show_date in normalized and show_clock in normalized
 
 
-async def get_element_attribute(element, name: str) -> str:
-    await element.update()
-    value = getattr(element.attrs, name, None)
-    if value is None:
-        return ""
-    return str(value)
-
-
 async def find_matching_schedule_row(page, show_time: str):
-    table = await page.select("table.table.table-bordered", timeout=10)
+    table = await robust_select(page, "table.table.table-bordered", timeout=10)
     if not table:
         return None
 
-    header_cells = await table.query_selector_all("thead tr th")
+    header_cells = await robust_child_select_all(table, "thead tr th")
     headers = tuple(normalize_text(cell.text_all) for cell in header_cells[:4])
     if headers != TARGET_TABLE_HEADERS:
         return None
 
     show_date, show_clock = parse_show_time_parts(show_time)
-    rows = await table.query_selector_all("tbody tr")
+    rows = await robust_child_select_all(table, "tbody tr")
     for row in rows:
-        cells = await row.query_selector_all("td")
+        cells = await robust_child_select_all(row, "td")
         if len(cells) < 4:
             continue
 
@@ -79,20 +79,20 @@ async def locate_purchase_button(page, show_time: str):
 
     row, cells = matched
     purchase_cell = cells[3]
-    purchase_button = await purchase_cell.query_selector("button[data-href]")
+    purchase_button = await robust_child_select(purchase_cell, "button[data-href]")
     status_text = normalize_text(purchase_cell.text_all)
 
     info = {
         "time": normalize_text(cells[0].text_all),
         "name": normalize_text(cells[1].text_all),
         "venue": normalize_text(cells[2].text_all),
-        "game_id": await get_element_attribute(row, "data-key"),
+        "game_id": await robust_get_attr(row, "data-key"),
         "status_text": status_text,
     }
 
     if purchase_button:
         info["status"] = "on_sale"
-        info["purchase_url"] = await get_element_attribute(purchase_button, "data-href")
+        info["purchase_url"] = await robust_get_attr(purchase_button, "data-href")
         return purchase_button, info
 
     if "開賣" in status_text and "剩餘" in status_text:
