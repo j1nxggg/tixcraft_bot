@@ -33,7 +33,7 @@ from login_flow import reload_to_clean_document, run_login  # noqa: E402
 from ocr import ensure_ocr_model_ready  # noqa: E402
 from rush_flow import rush_to_area  # noqa: E402
 from schedule import build_game_url, build_purchase_url, locate_purchase_button  # noqa: E402
-from ticket_flow import process_ticket_form  # noqa: E402
+from ticket_flow import process_ticket_form, wait_ticket_form_ready  # noqa: E402
 from time_sync import (  # noqa: E402
     calibrate_server_time_offset,
     parse_grab_time,
@@ -45,12 +45,80 @@ from time_sync import (  # noqa: E402
 AREA_SELECT_SUCCESS_STATUSES = {"selected_exact", "selected_fallback"}
 EARLY_RUSH_SECONDS = 1.0           # 提前開 rush 的秒數,抵消網路延遲
 SCHEDULE_READY_TIMEOUT = 15.0      # 登入後等場次列表 DOM 出現的上限
+AREA_ATTEMPT_TIMEOUT = 60.0        # 每輪從選區頁到填票頁的等待上限
+AREA_RETRY_BACKOFF = 0.2           # 選區頁重試前的小間隔
 
 
 async def _wait_schedule_ready(page, timeout: float = SCHEDULE_READY_TIMEOUT) -> bool:
     """等待場次列表第一列 DOM ready。"""
     row = await robust_select(page, "#gameList table tbody tr", timeout=timeout)
     return row is not None
+
+
+async def _run_area_attempt(page, purchase_url: str, env_config: dict) -> str:
+    """嘗試從購票 URL 進到填票頁。
+
+    回傳:
+        ready:已進入填票頁
+        retry:本輪像是載入/導頁問題,可重新導向選區頁
+        terminal:票區設定或庫存狀態不符合,重試通常不會改善
+    """
+    if not await rush_to_area(page, purchase_url, timeout=AREA_ATTEMPT_TIMEOUT):
+        return "retry"
+    log(f"[{datetime.now(TAIPEI_TZ).isoformat()}] 已進入選區頁")
+
+    await wait_ready_state(page, state="complete", timeout=10.0)
+
+    area_result = await select_area_ticket(
+        page,
+        env_config["TICKET_NAME"],
+        env_config["TICKET_PRICE"],
+        env_config["FALLBACK_POLICY"],
+    )
+    log(format_area_selection_result(area_result))
+
+    status = area_result["status"]
+    if status == "area_list_not_found":
+        return "retry"
+    if status not in AREA_SELECT_SUCCESS_STATUSES:
+        return "terminal"
+
+    await wait_ready_state(page, state="complete", timeout=10.0)
+    if await wait_ticket_form_ready(page, timeout=AREA_ATTEMPT_TIMEOUT):
+        return "ready"
+    return "retry"
+
+
+async def _prepare_ticket_form(page, purchase_url: str, env_config: dict) -> bool:
+    """重試選區流程,直到進入填票頁或遇到不可重試狀態。"""
+    attempt = 0
+
+    while True:
+        attempt += 1
+        log(f"第 {attempt} 輪導向選區頁,最多等待 {AREA_ATTEMPT_TIMEOUT:.0f}s 進入填票頁")
+
+        try:
+            result = await asyncio.wait_for(
+                _run_area_attempt(page, purchase_url, env_config),
+                timeout=AREA_ATTEMPT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            log(
+                f"第 {attempt} 輪超過 {AREA_ATTEMPT_TIMEOUT:.0f}s "
+                "仍未進入填票頁,重新導向選區頁"
+            )
+            await asyncio.sleep(AREA_RETRY_BACKOFF)
+            continue
+
+        if result == "ready":
+            log("已進入填票頁,開始處理票券表單")
+            return True
+
+        if result == "terminal":
+            return False
+
+        log(f"第 {attempt} 輪未能進入填票頁,重新導向選區頁")
+        await asyncio.sleep(AREA_RETRY_BACKOFF)
 
 
 async def _cancel_recalibrate(
@@ -175,27 +243,9 @@ async def _run_bot(
         # rush 前主動停背景校時;finally 裡還會再 set 一次做 cleanup。
         stop_recalibrate.set()
 
-        # 3. rush 到選區頁
-        if not await rush_to_area(page, purchase_url):
-            log("rush 未能在時限內進入選區頁,中止")
+        # 3-4. 導向選區頁並選區,60 秒內沒進填票頁就重新導向。
+        if not await _prepare_ticket_form(page, purchase_url, env_config):
             return
-        log(f"[{datetime.now(TAIPEI_TZ).isoformat()}] 已進入選區頁")
-
-        await wait_ready_state(page, state="complete", timeout=10.0)
-
-        # 4. 選區
-        area_result = await select_area_ticket(
-            page,
-            env_config["TICKET_NAME"],
-            env_config["TICKET_PRICE"],
-            env_config["FALLBACK_POLICY"],
-        )
-        log(format_area_selection_result(area_result))
-
-        if area_result["status"] not in AREA_SELECT_SUCCESS_STATUSES:
-            return
-
-        await wait_ready_state(page, state="complete", timeout=10.0)
 
         # 5. 填票券表單並送出
         await process_ticket_form(page, ocr_session, env_config["TICKET_QUANTITY"])

@@ -18,15 +18,8 @@ import (
 type profileCheckDoneMsg struct {
 	projectDir string
 	profileDir string
-	sourceDir  string
 	summary    string
 	exists     bool
-	err        error
-}
-
-type profileCopyDoneMsg struct {
-	projectDir string
-	profileDir string
 	err        error
 }
 
@@ -44,7 +37,7 @@ type chromeProfileChoice struct {
 
 type profileMetadata struct {
 	InitializedAt         string `json:"initialized_at"`
-	SourceDir             string `json:"source_dir"`
+	SourceDir             string `json:"source_dir,omitempty"`
 	FirstLoginCompletedAt string `json:"first_login_completed_at,omitempty"`
 }
 
@@ -66,6 +59,8 @@ type chromeLocalStateEntry struct {
 	GaiaName string `json:"gaia_name"`
 	Name     string `json:"name"`
 }
+
+const defaultChromeProfileDir = "Default"
 
 func checkProfileCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -110,7 +105,15 @@ func checkProfileCmd() tea.Cmd {
 			}
 		}
 
-		sourceDir, err := chromeUserDataDir()
+		if err := initializeDedicatedProfile(profileDir); err != nil {
+			return profileCheckDoneMsg{
+				projectDir: projectDir,
+				profileDir: profileDir,
+				err:        err,
+			}
+		}
+
+		displayInfo, err := loadProfileDisplayInfo(projectDir, profileDir)
 		if err != nil {
 			return profileCheckDoneMsg{
 				projectDir: projectDir,
@@ -122,21 +125,8 @@ func checkProfileCmd() tea.Cmd {
 		return profileCheckDoneMsg{
 			projectDir: projectDir,
 			profileDir: profileDir,
-			sourceDir:  sourceDir,
-			exists:     false,
-		}
-	}
-}
-
-func copyProfileCmd(projectDir, sourceDir string) tea.Cmd {
-	return func() tea.Msg {
-		profileDir := filepath.Join(projectDir, "Profile")
-		err := copyChromeProfile(sourceDir, profileDir)
-
-		return profileCopyDoneMsg{
-			projectDir: projectDir,
-			profileDir: profileDir,
-			err:        err,
+			summary:    buildExistingProfileSummary(profileDir, displayInfo),
+			exists:     true,
 		}
 	}
 }
@@ -181,41 +171,12 @@ func detectProjectDir() (string, error) {
 	return exeDir, nil
 }
 
-func chromeUserDataDir() (string, error) {
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		return "", errors.New("找不到 LOCALAPPDATA, 無法定位 Chrome User Data")
-	}
-
-	return filepath.Join(localAppData, "Google", "Chrome", "User Data"), nil
-}
-
-func copyChromeProfile(sourceDir, destDir string) error {
-	sourceInfo, err := os.Stat(sourceDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("找不到 Chrome User Data: %s", sourceDir)
-		}
-		return fmt.Errorf("讀取 Chrome User Data 失敗: %w", err)
-	}
-
-	if !sourceInfo.IsDir() {
-		return fmt.Errorf("Chrome User Data 路徑不是資料夾: %s", sourceDir)
-	}
-
-	if err := killChromeProcesses(); err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+func initializeDedicatedProfile(profileDir string) error {
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
 		return fmt.Errorf("建立 Profile 資料夾失敗: %w", err)
 	}
 
-	if err := runRobocopy(sourceDir, destDir); err != nil {
-		return fmt.Errorf("複製 Chrome 資料失敗: %w", err)
-	}
-
-	if err := writeProfileMetadata(destDir, sourceDir); err != nil {
+	if err := writeProfileMetadata(profileDir); err != nil {
 		return err
 	}
 
@@ -327,36 +288,6 @@ func chromeProcessesRunning() (bool, error) {
 	return strings.Contains(strings.ToLower(out), "chrome.exe"), nil
 }
 
-func runRobocopy(sourceDir, destDir string) error {
-	cmd := exec.Command(
-		"robocopy",
-		sourceDir,
-		destDir,
-		"/E",
-		"/XJ",
-		"/R:1",
-		"/W:1",
-		"/MT:16",
-	)
-
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		return nil
-	}
-
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
-		return fmt.Errorf("robocopy 執行失敗: %w\n%s", err, string(output))
-	}
-
-	exitCode := exitErr.ExitCode()
-	if exitCode < 8 {
-		return nil
-	}
-
-	return fmt.Errorf("robocopy exit code %d\n%s", exitCode, string(output))
-}
-
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -369,10 +300,9 @@ func profileMetaPath(projectDir string) string {
 	return filepath.Join(projectDir, "Profile", ".bot-meta.json")
 }
 
-func writeProfileMetadata(profileDir, sourceDir string) error {
+func writeProfileMetadata(profileDir string) error {
 	meta := profileMetadata{
 		InitializedAt: time.Now().Format(time.RFC3339),
-		SourceDir:     sourceDir,
 	}
 
 	data, err := json.MarshalIndent(meta, "", "  ")
@@ -417,7 +347,7 @@ func loadProfileDisplayInfo(projectDir, profileDir string) (profileDisplayInfo, 
 
 func buildExistingProfileSummary(profileDir string, displayInfo profileDisplayInfo) string {
 	lines := []string{
-		"專案目錄內已存在獨立 Chrome 副本：",
+		"專案目錄內已存在專用 Chrome Profile：",
 		profileDir,
 		"",
 		fmt.Sprintf("%s：%s", displayInfo.TimeLabel, displayInfo.TimeValue),
@@ -430,8 +360,8 @@ func buildExistingProfileSummary(profileDir string, displayInfo profileDisplayIn
 	lines = append(
 		lines,
 		"",
-		"這份 Profile 為獨立副本，之後將持續沿用。",
-		"如果登入失效或想換帳號，可按 r 重置 Profile 後重新建立副本。",
+		"這份 Profile 由 Chrome 自行建立,不會複製你的日常 Chrome 資料。",
+		"每次登入仍會由你在瀏覽器中手動完成;如需清乾淨可按 r 重置 Profile。",
 	)
 	return strings.Join(lines, "\n")
 }
@@ -440,6 +370,9 @@ func loadChromeProfileChoices(profileDir string) ([]chromeProfileChoice, error) 
 	localStatePath := filepath.Join(profileDir, "Local State")
 	data, err := os.ReadFile(localStatePath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return defaultChromeProfileChoices(), nil
+		}
 		return nil, fmt.Errorf("讀取 Chrome Local State 失敗: %w", err)
 	}
 
@@ -497,10 +430,19 @@ func loadChromeProfileChoices(profileDir string) ([]chromeProfileChoice, error) 
 	}
 
 	if len(choices) == 0 {
-		return nil, errors.New("找不到可用的 Chrome 設定檔")
+		return defaultChromeProfileChoices(), nil
 	}
 
 	return choices, nil
+}
+
+func defaultChromeProfileChoices() []chromeProfileChoice {
+	return []chromeProfileChoice{
+		{
+			Basename: defaultChromeProfileDir,
+			Label:    "Default (專用 Profile)",
+		},
+	}
 }
 
 func moveStringToFront(items []string, target string) []string {

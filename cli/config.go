@@ -169,7 +169,7 @@ func newConfigForm(initial *botConfig, chromeProfiles []chromeProfileChoice) *hu
 	accountGroup := huh.NewGroup(
 		huh.NewSelect[string]().
 			Title("Chrome 設定檔").
-			Description("從 Local State 的 gaia_name 讀取可用帳號").
+			Description("使用專案內的獨立 Chrome Profile").
 			Options(profileOptions...).
 			Value(&initial.ChromeProfileDir),
 

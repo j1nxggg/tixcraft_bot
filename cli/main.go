@@ -41,7 +41,6 @@ type model struct {
 	quitMsg           string
 	projectDir        string
 	profileDir        string
-	sourceDir         string
 	rootDir           string
 	venvDir           string
 	envPath           string
@@ -76,7 +75,7 @@ func spinnerTickCmd() tea.Cmd {
 func initialModel() model {
 	return model{
 		stage:      stageChecking,
-		statusText: "正在檢查專案目錄中的 Profile/...",
+		statusText: "正在檢查專案目錄中的專用 Profile/...",
 	}
 }
 
@@ -93,9 +92,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case profileCheckDoneMsg:
 		return m.handleCheckDone(msg)
-
-	case profileCopyDoneMsg:
-		return m.handleCopyDone(msg)
 
 	case profileResetDoneMsg:
 		return m.handleResetDone(msg)
@@ -162,7 +158,6 @@ func (m model) updateConfigForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) handleCheckDone(msg profileCheckDoneMsg) (tea.Model, tea.Cmd) {
 	m.projectDir = msg.projectDir
 	m.profileDir = msg.profileDir
-	m.sourceDir = msg.sourceDir
 
 	if msg.err != nil {
 		m.stage = stageDone
@@ -189,38 +184,9 @@ func (m model) handleCheckDone(msg profileCheckDoneMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.stage = stageConfirm
-	m.statusText = "目前目錄內沒有 Chrome 資料"
+	m.statusText = "目前目錄內沒有專用 Profile"
 	m.detailText = m.confirmDetail()
 	return m, nil
-}
-
-func (m model) handleCopyDone(msg profileCopyDoneMsg) (tea.Model, tea.Cmd) {
-	m.projectDir = msg.projectDir
-	m.profileDir = msg.profileDir
-
-	if msg.err != nil {
-		m.stage = stageDone
-		m.success = false
-		m.statusText = "Chrome 資料複製失敗"
-		m.detailText = msg.err.Error()
-		return m, nil
-	}
-
-	if err := m.loadChromeProfiles(); err != nil {
-		m.stage = stageDone
-		m.success = false
-		m.statusText = "Chrome 設定檔讀取失敗"
-		m.detailText = err.Error()
-		return m, nil
-	}
-
-	m.stage = stagePythonCheck
-	m.statusText = "Chrome 資料複製完成,正在檢查 Python..."
-	m.detailText = fmt.Sprintf(
-		"Chrome User Data 已複製到：\n%s\n\nProfile 已建立為獨立副本。\n因為 Chrome 127 之後新增的 Cookie 加密機制（App-Bound Encryption），複製過來的登入狀態無法直接繼承，這是預期行為，不是程式錯誤。\n首次啟動時，請在 Chrome 中手動登入目標站點（Tixcraft、Google 等）。登入完成後，session 會保存在這份副本中，之後每次啟動都會沿用。",
-		msg.profileDir,
-	)
-	return m, checkPythonCmd(m.projectDir)
 }
 
 func (m model) handleResetDone(msg profileResetDoneMsg) (tea.Model, tea.Cmd) {
@@ -415,7 +381,7 @@ func (m model) handleProfileMenuKey(key string) (tea.Model, tea.Cmd) {
 		m.stage = stageProfileResetConfirm
 		m.statusText = "即將重置 Profile"
 		m.detailText = fmt.Sprintf(
-			"這會刪除目前專案內的 Chrome 副本，並刪除 %s。\n\n只會刪除 ./Profile 與 metadata，bot/.env 會保留。\n接下來會先關閉所有 Chrome，再重新回到初始化流程。\n\n刪除目標：%s",
+			"這會刪除目前專案內的專用 Chrome Profile，並刪除 %s。\n\n只會刪除 ./Profile 與 metadata，bot/.env 會保留。\n接下來會先關閉 Chrome，再重新回到初始化流程。\n\n刪除目標：%s",
 			profileMetaPath(m.projectDir),
 			m.profileDir,
 		)
@@ -447,17 +413,13 @@ func (m model) handleProfileResetConfirmKey(key string) (tea.Model, tea.Cmd) {
 func (m model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y":
-		m.stage = stageWarnChromeClose
-		m.statusText = "開始複製前請先關閉 Chrome"
-		m.detailText = fmt.Sprintf(
-			"請先手動關閉所有 Chrome 視窗。\n\n若你直接繼續,程式接下來會嘗試強制關閉 Chrome,以避免 Profile 複製失敗或資料不完整。\n\n來源：%s\n目的地：%s",
-			m.sourceDir,
-			m.profileDir,
-		)
-		return m, nil
+		m.stage = stageChecking
+		m.statusText = "正在建立專用 Profile..."
+		m.detailText = fmt.Sprintf("目的地：%s", m.profileDir)
+		return m, checkProfileCmd()
 	case "n":
 		m.quitting = true
-		m.quitMsg = "已取消,不進行 Chrome 資料複製。"
+		m.quitMsg = "已取消,不建立專用 Profile。"
 		return m, tea.Quit
 	}
 	return m, nil
@@ -466,13 +428,13 @@ func (m model) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 func (m model) handleWarnKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "y":
-		m.stage = stageRunning
-		m.statusText = "正在關閉 Chrome 並複製資料..."
-		m.detailText = fmt.Sprintf("來源：%s\n目的地：%s", m.sourceDir, m.profileDir)
-		return m, copyProfileCmd(m.projectDir, m.sourceDir)
+		m.stage = stageChecking
+		m.statusText = "正在建立專用 Profile..."
+		m.detailText = fmt.Sprintf("目的地：%s", m.profileDir)
+		return m, checkProfileCmd()
 	case "n":
 		m.stage = stageConfirm
-		m.statusText = "目前目錄內沒有 Chrome 資料"
+		m.statusText = "目前目錄內沒有專用 Profile"
 		m.detailText = m.confirmDetail()
 		return m, nil
 	}
@@ -549,9 +511,8 @@ func (m model) launchBot(reason string) (tea.Model, tea.Cmd) {
 
 func (m model) confirmDetail() string {
 	return fmt.Sprintf(
-		"是否同意複製一份到此目錄?\n\n專案目錄：%s\n來源：%s\n目的地：%s",
+		"是否建立專用 Chrome Profile?\n\n專案目錄：%s\n目的地：%s\n\n不會複製你的日常 Chrome 資料。",
 		m.projectDir,
-		m.sourceDir,
 		m.profileDir,
 	)
 }
@@ -693,7 +654,7 @@ func (m model) helpText() string {
 	case stageProfileResetConfirm:
 		return "[ y ] 重置並重新初始化  [ n ] 返回  [ q ] 離開"
 	case stageConfirm:
-		return "[ y ] 同意複製  [ n ] 取消  [ q ] 離開"
+		return "[ y ] 建立 Profile  [ n ] 取消  [ q ] 離開"
 	case stageWarnChromeClose:
 		return "[ y ] 已了解並繼續  [ n ] 返回上一步  [ q ] 離開"
 	case stageConfigConfirmOverwrite:

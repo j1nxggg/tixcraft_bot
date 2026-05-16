@@ -32,7 +32,7 @@ VERIFY_CODE_INPUT_SELECTOR = "#TicketForm_verifyCode"
 AGREE_CHECKBOX_SELECTOR = "#TicketForm_agree"
 SUBMIT_BUTTON_SELECTOR = "button.btn-primary.btn-green[type='submit']"
 
-CHECKOUT_URL_FRAGMENT = "/ticket/checkout"
+CHECKOUT_URL = "https://tixcraft.com/ticket/checkout"
 SUBMIT_RESULT_TIMEOUT = 3600.0  # 一小時,搶票高峰主機可能很慢
 SUBMIT_RESULT_POLL = 0.2
 MAX_RETRIES = 30
@@ -60,10 +60,39 @@ _FETCH_CAPTCHA_JS = """
 })()
 """
 
+_CHECKOUT_CONFIRMATION_JS = f"""
+(() => {{
+  const checkoutUrl = `${{location.origin}}${{location.pathname}}`
+    .replace(/\\/$/, '')
+    .toLowerCase();
+  if (checkoutUrl !== {CHECKOUT_URL!r}) {{
+    return false;
+  }}
+
+  const text = (document.body?.innerText || '')
+    .replace(/\\s+/g, ' ')
+    .trim();
+  return (
+    /請於\\s*\\d+\\s*分\\s*\\d+\\s*秒\\s*內完成資料填寫/.test(text) &&
+    text.includes('付款及配送方式')
+  );
+}})()
+"""
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # 表單個別動作
 # ─────────────────────────────────────────────────────────────────────────
+async def wait_ticket_form_ready(page, timeout: float) -> bool:
+    """等待填票頁的票數 select 出現。"""
+    select_element = await robust_select(
+        page,
+        QUANTITY_SELECT_SELECTOR,
+        timeout=timeout,
+    )
+    return select_element is not None
+
+
 async def _select_quantity(page, quantity: str) -> bool:
     select_element = await robust_select(page, QUANTITY_SELECT_SELECTOR, timeout=15)
     if not select_element:
@@ -207,8 +236,8 @@ async def _play_success_sound() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 async def _wait_submit_result(page, alert_flag: dict) -> str:
     # 回傳 "success" / "captcha_error" / "timeout"
-    # 策略:同時監看 alert 旗標 + Tab.url,看哪個先到。
-    # URL 靠 CDP Target 事件更新,不用 evaluate,避免被 CDP bug 拖住。
+    # 策略:同時監看 alert 旗標 + checkout 頁面的付款資料倒數提示。
+    # checkout 成功判定同時要求 location 與頁面文字,避免 Tab.url stale 誤判。
     alert_flag["triggered"] = False
     deadline = asyncio.get_event_loop().time() + SUBMIT_RESULT_TIMEOUT
 
@@ -216,8 +245,12 @@ async def _wait_submit_result(page, alert_flag: dict) -> str:
         if alert_flag["triggered"]:
             return "captcha_error"
 
-        current_url = (getattr(page, "url", "") or "").lower()
-        if CHECKOUT_URL_FRAGMENT in current_url:
+        checkout_ready = await robust_evaluate(
+            page,
+            _CHECKOUT_CONFIRMATION_JS,
+            timeout=1.0,
+        )
+        if checkout_ready is True:
             return "success"
 
         await asyncio.sleep(SUBMIT_RESULT_POLL)
