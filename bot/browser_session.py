@@ -14,9 +14,11 @@ import json
 import socket
 import subprocess
 import sys
+import textwrap
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 from nodriver import Config, start
 from nodriver.core import util as nodriver_util
@@ -150,6 +152,7 @@ class BotBrowser:
     async def __aenter__(self) -> "BotBrowser":
         _normalize_profile_exit_state()
         self.browser = await _launch_or_attach(self.chrome_profile_dir)
+        _bring_chrome_window_to_front()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -196,7 +199,9 @@ class BotBrowser:
         log(f"已開新 tab 導向:{target_url}")
 
         # 只看 Tab.url,避免初始頁面還沒 ready 時做 Runtime.evaluate。
-        await _wait_tab_url_contains(new_tab, "tixcraft.com", timeout=_URL_SETTLE_TIMEOUT)
+        target_host = urlparse(target_url).hostname or ""
+        if target_host:
+            await _wait_tab_url_contains(new_tab, target_host, timeout=_URL_SETTLE_TIMEOUT)
 
         new_target_id = getattr(new_tab, "target_id", None)
         if new_target_id:
@@ -235,6 +240,52 @@ def _build_browser_config(chrome_profile_dir: str, port: int) -> Config:
         host="127.0.0.1",
         port=port,
     )
+
+
+def _bring_chrome_window_to_front() -> None:
+    """Best-effort:把 Chrome 主視窗帶到 Windows 前景。"""
+    if sys.platform != "win32":
+        return
+
+    script = r"""
+    Add-Type @"
+    using System;
+    using System.Runtime.InteropServices;
+    public class Win32 {
+      [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+      [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    }
+    "@
+
+    $chrome = Get-Process chrome -ErrorAction SilentlyContinue |
+      Where-Object { $_.MainWindowHandle -ne 0 } |
+      Sort-Object StartTime -Descending |
+      Select-Object -First 1
+
+    if ($chrome) {
+      [Win32]::ShowWindowAsync($chrome.MainWindowHandle, 9) | Out-Null
+      [Win32]::SetForegroundWindow($chrome.MainWindowHandle) | Out-Null
+    }
+    """
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                textwrap.dedent(script),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
 
 
 async def _launch_or_attach(chrome_profile_dir: str):
