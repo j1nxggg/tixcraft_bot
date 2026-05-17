@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,9 @@ import (
 type appStage int
 
 const (
-	stageChecking appStage = iota
+	stageModeSelect appStage = iota
+	stageTestRunCount
+	stageChecking
 	stageProfileMenu
 	stageProfileResetConfirm
 	stageProfileResetting
@@ -46,6 +49,9 @@ type model struct {
 	envPath           string
 	oldConfig         botConfig
 	cfg               *botConfig
+	testMode          bool
+	testRunCount      int
+	testRunCountInput string
 	form              *huh.Form
 	chromeProfiles    []chromeProfileChoice
 	profileMenuDetail string
@@ -58,7 +64,8 @@ type model struct {
 type spinnerTickMsg struct{}
 
 type botProcessDoneMsg struct {
-	err error
+	err    error
+	output string
 }
 
 // 手寫 spinner,避免多引入 bubbles 當 direct dep
@@ -74,13 +81,15 @@ func spinnerTickCmd() tea.Cmd {
 
 func initialModel() model {
 	return model{
-		stage:      stageChecking,
-		statusText: "正在檢查專案目錄中的專用 Profile/...",
+		stage:        stageModeSelect,
+		statusText:   "請選擇執行模式",
+		detailText:   "1. 測試模式\n2. 正式搶票",
+		testRunCount: 1,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(checkProfileCmd(), spinnerTickCmd())
+	return spinnerTickCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -178,7 +187,7 @@ func (m model) handleCheckDone(msg profileCheckDoneMsg) (tea.Model, tea.Cmd) {
 
 		m.profileMenuDetail = msg.summary
 		m.stage = stageProfileMenu
-		m.statusText = "Profile 已就緒"
+		m.statusText = m.modePrefix() + "Profile 已就緒"
 		m.detailText = msg.summary
 		return m, nil
 	}
@@ -257,6 +266,9 @@ func (m model) handleUvSync(msg uvSyncDoneMsg) (tea.Model, tea.Cmd) {
 
 	m.stage = stageConfigCheck
 	m.statusText = "套件同步完成,正在檢查設定檔..."
+	if m.testMode {
+		return m.launchTestBot("測試模式環境已就緒")
+	}
 	return m, checkConfigCmd(m.rootDir)
 }
 
@@ -338,7 +350,11 @@ func (m model) handleBotProcessDone(msg botProcessDoneMsg) (tea.Model, tea.Cmd) 
 	m.stage = stageDone
 	m.success = false
 	m.statusText = "Python bot 執行失敗"
-	m.detailText = msg.err.Error()
+	if strings.TrimSpace(msg.output) == "" {
+		m.detailText = msg.err.Error()
+	} else {
+		m.detailText = fmt.Sprintf("%s\n\n最後輸出：\n%s", msg.err.Error(), msg.output)
+	}
 	return m, nil
 }
 
@@ -354,6 +370,10 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.stage {
+	case stageModeSelect:
+		return m.handleModeSelectKey(key)
+	case stageTestRunCount:
+		return m.handleTestRunCountKey(key)
 	case stageProfileMenu:
 		return m.handleProfileMenuKey(key)
 	case stageProfileResetConfirm:
@@ -370,11 +390,70 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleModeSelectKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "1":
+		m.testMode = true
+		m.stage = stageTestRunCount
+		m.statusText = "測試模式：請輸入連續執行次數"
+		m.detailText = "最少 1 次，最多 30 次。直接按 Enter 使用預設 1 次。"
+		m.testRunCountInput = ""
+		m.testRunCount = 1
+		return m, nil
+	case "2":
+		m.testMode = false
+		m.stage = stageChecking
+		m.statusText = "正式搶票：正在檢查專案目錄中的專用 Profile/..."
+		m.detailText = ""
+		return m, checkProfileCmd()
+	}
+	return m, nil
+}
+
+func (m model) handleTestRunCountKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		count := 1
+		if strings.TrimSpace(m.testRunCountInput) != "" {
+			parsed, err := strconv.Atoi(m.testRunCountInput)
+			if err != nil || parsed < 1 || parsed > 30 {
+				m.detailText = fmt.Sprintf(
+					"目前輸入：%s\n請輸入 1 到 30；直接按 Enter 使用預設 1 次。",
+					m.testRunCountInput,
+				)
+				return m, nil
+			}
+			count = parsed
+		}
+
+		m.testRunCount = count
+		m.stage = stageChecking
+		m.statusText = "測試模式：正在檢查專案目錄中的專用 Profile/..."
+		m.detailText = fmt.Sprintf("連續執行次數：%d", count)
+		return m, checkProfileCmd()
+	case "backspace", "ctrl+h":
+		if len(m.testRunCountInput) > 0 {
+			m.testRunCountInput = m.testRunCountInput[:len(m.testRunCountInput)-1]
+		}
+	default:
+		if len(key) == 1 && key[0] >= '0' && key[0] <= '9' && len(m.testRunCountInput) < 2 {
+			m.testRunCountInput += key
+		}
+	}
+
+	display := m.testRunCountInput
+	if display == "" {
+		display = "預設 1"
+	}
+	m.detailText = fmt.Sprintf("目前輸入：%s\n最少 1 次，最多 30 次。按 Enter 確認。", display)
+	return m, nil
+}
+
 func (m model) handleProfileMenuKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "c":
 		m.stage = stagePythonCheck
-		m.statusText = "Profile 已就緒,正在檢查 Python..."
+		m.statusText = m.modePrefix() + "Profile 已就緒,正在檢查 Python..."
 		m.detailText = m.profileMenuDetail
 		return m, checkPythonCmd(m.projectDir)
 	case "r":
@@ -503,10 +582,19 @@ func (m model) launchBot(reason string) (tea.Model, tea.Cmd) {
 
 	cmd := exec.Command(python, "-u", script)
 	cmd.Dir = m.rootDir
+	cmd.Env = pythonProcessEnv()
+	output := attachProcessOutput(cmd)
 
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return botProcessDoneMsg{err: err}
+		return botProcessDoneMsg{err: err, output: output.String()}
 	})
+}
+
+func (m model) modePrefix() string {
+	if m.testMode {
+		return "測試模式："
+	}
+	return "正式搶票："
 }
 
 func (m model) confirmDetail() string {
@@ -616,6 +704,8 @@ func (m model) renderContent() string {
 		status = ui.ErrorStyle.Render("失敗") + " " + status
 	case m.stage == stageProfileMenu,
 		m.stage == stageProfileResetConfirm,
+		m.stage == stageModeSelect,
+		m.stage == stageTestRunCount,
 		m.stage == stageConfirm,
 		m.stage == stageWarnChromeClose,
 		m.stage == stageConfigConfirmOverwrite,
@@ -649,6 +739,10 @@ func (m model) renderContent() string {
 
 func (m model) helpText() string {
 	switch m.stage {
+	case stageModeSelect:
+		return "[ 1 ] 測試模式  [ 2 ] 正式搶票  [ q ] 離開"
+	case stageTestRunCount:
+		return "[ 1-30 ] 次數  [ enter ] 確認  [ q ] 離開"
 	case stageProfileMenu:
 		return "[ c ] 繼續  [ r ] 重置 Profile  [ q ] 離開"
 	case stageProfileResetConfirm:
