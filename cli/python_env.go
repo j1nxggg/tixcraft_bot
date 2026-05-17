@@ -19,8 +19,6 @@ const (
 )
 
 // nodriverFinallyContinuePattern 找 `finally:` 後面接 `continue` 的 block(允許空白變異)。
-// Python 3.14 對 finally 裡 continue 會 SyntaxWarning,未來版本可能變 SyntaxError。
-// 實際語意上是多餘的(同一迴圈 except 裡已經 continue),拿掉不影響行為。
 var nodriverFinallyContinuePattern = regexp.MustCompile(
 	`(?m)^[ \t]+finally:[ \t]*\r?\n[ \t]+continue[ \t]*\r?\n`,
 )

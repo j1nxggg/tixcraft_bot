@@ -9,8 +9,6 @@ Profile/
 *.exe
 
 .env
-.profile-meta.json
-.chrome-cdp.json
 
 README.md
 bot/temp/
